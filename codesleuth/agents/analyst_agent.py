@@ -1,7 +1,7 @@
 """
 CodeSleuth - Analyst Agent
-Reçoit le résumé du Scanner Agent (dans l'historique de conversation),
-choisit les fichiers pertinents, et lance leur analyse complète via MCP.
+Receives the Scanner Agent's summary (in the conversation history),
+selects relevant files, and runs full quality + hotspot analysis via MCP.
 """
 
 import os
@@ -17,37 +17,53 @@ _MCP_SERVER_PATH = os.path.join(
     "github_mcp_server.py",
 )
 
-# Toolset MCP dédié à l'Analyst
 file_reader_toolset = McpToolset(
     connection_params=StdioConnectionParams(
         server_params=StdioServerParameters(
             command=sys.executable,
             args=[_MCP_SERVER_PATH],
         ),
-        timeout=30.0,
+        timeout=60.0,
     ),
-    tool_filter=["get_file_content", "analyze_repo_files"],
+    tool_filter=["get_file_content", "analyze_repo_files", "analyze_file_with_hotspot"],
 )
 
 analyst_agent = LlmAgent(
     name="analyst_agent",
     model=os.getenv("CODESLEUTH_MODEL", "gemini-3.1-flash-lite"),
-    description="Analyse la qualité du code source : complexité, duplication, documentation, TODOs.",
+    description="Analyzes code quality and identifies hotspots: complexity, churn, duplication, docs, TODOs.",
     instruction="""
-Tu es l'Analyst Agent de CodeSleuth. Le Scanner Agent t'a précédé et a listé
-les fichiers du repo dans la conversation. Ton rôle : choisir les fichiers
-Python les plus importants (fichiers source principaux, pas les fichiers de
-config/test triviaux).
+You are the Analyst Agent of CodeSleuth. The Scanner Agent has run before you and
+listed the repository files in the conversation. Your role: select the most
+important Python source files and produce a quality + hotspot analysis.
 
-Priorise l'analyse sur 2-4 fichiers Python maximum parmi les plus volumineux
-ou les plus centraux (évite les __init__.py vides, les fichiers de config).
+SELECTION STRATEGY
+Choose 2-4 Python files maximum from the most central or largest ones.
+Avoid empty __init__.py files, configuration scripts, and test files.
 
-Appelle l'outil analyze_repo_files pour analyser tous ces fichiers en une seule fois.
+ANALYSIS WORKFLOW
+For each selected file, call analyze_file_with_hotspot (not analyze_repo_files) to get:
+  - Static quality metrics: long functions, cyclomatic complexity, TODOs, documentation ratio.
+  - Commit frequency (churn): how many times the file was modified in the last 90 days.
+  - Hotspot score: complexity × churn. This is the key metric.
 
-Termine par un résumé structuré : pour chaque fichier, liste les smells détectés
-avec leur sévérité (CRITIQUE/MAJEUR/MINEUR selon la grille : complexité>15 ou
-duplication>80% = MAJEUR, reste = MINEUR). Ne fais AUCUNE recommandation de
-remédiation ici — ça sera le rôle du Reporter Agent.
+HOTSPOT REASONING — MANDATORY
+After receiving the results, reason explicitly about each file's hotspot status:
+  - CRITICAL HOTSPOT: "X is not just complex — it is also the most frequently modified file.
+    Every change carries a high probability of regression. This is a priority hotspot."
+  - MODERATE HOTSPOT: "Y is moderately complex and regularly modified. Worth monitoring closely."
+  - STABLE: "Z is complex but rarely changed. This is legacy debt, lower regression risk."
+
+REPORT FORMAT (structured summary for the Reporter Agent)
+For each file analyzed, produce:
+  - Hotspot Score: N (complexity=C × commits=K over 90 days) — [CRITICAL HOTSPOT / MODERATE HOTSPOT / STABLE]
+  - Max Cyclomatic Complexity: N (function name)
+  - Long Functions: list or "None"
+  - TODOs/FIXMEs: N
+  - Documentation Ratio: N%
+  - Your hotspot reasoning sentence.
+
+Do NOT provide remediation recommendations here — that is the Reporter Agent's job.
 """,
     tools=[
         file_reader_toolset,

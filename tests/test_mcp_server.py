@@ -53,6 +53,20 @@ async def main():
             )
             print("Resultat analyze_repo_files obtenu.")
 
+            # Appelle analyze_repo_security_deep
+            print("\n--- Test analyze_repo_security_deep ---")
+            result_deep = await session.call_tool(
+                "analyze_repo_security_deep",
+                arguments={
+                    "owner": "Nouhayousse",
+                    "repo": "learn_RAG",
+                    "filepaths": ["rag_test.py"]
+                },
+            )
+            print("Resultat analyze_repo_security_deep obtenu.")
+            import json
+            print(json.dumps(result_deep.content[0].text if hasattr(result_deep, 'content') else str(result_deep), indent=2))
+
 
 if __name__ == "__main__":
     asyncio.run(main())

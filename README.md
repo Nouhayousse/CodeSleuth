@@ -7,27 +7,30 @@
 
 ## Overview
 
-CodeSleuth is a **4-agent sequential pipeline** built with the [Google Agent Development Kit (ADK)](https://google.github.io/adk-docs/). Given a public GitHub repository, it:
+CodeSleuth is a **5-agent sequential pipeline** built with the [Google Agent Development Kit (ADK)](https://google.github.io/adk-docs/). Given a public GitHub repository, it:
 
 1. **Scans** the full repository structure and dependencies in a single API call.
-2. **Analyzes** the most important Python source files for code smells (complexity, duplication, documentation, TODOs).
-3. **Audits security**: checks all PyPI dependencies against [OSV.dev](https://osv.dev/) for known CVEs, and scans source files with regex patterns to detect accidentally exposed secrets.
-4. **Reports**: synthesizes all findings into a scored, prioritized technical debt report in Markdown.
+2. **Analyzes** the most important Python source files for code quality and **hotspot analysis** (complexity × commit frequency).
+3. **Audits security**: CVE checks via [OSV.dev](https://osv.dev/), dangerous API pattern detection (Python + Java), attack surface analysis, OWASP Top 10 mapping, and an explained security score.
+4. **Reports**: synthesizes all findings into a scored, prioritized technical debt audit in Markdown.
+5. **Validates**: a Critic Agent challenges the report's coherence (LLM-as-judge pattern) before final delivery.
 
 ```
 User Prompt: "Audit google/adk-python"
         │
         ▼
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  Scanner Agent   │ -> │  Analyst Agent   │ -> │  Security Agent  │ -> │  Reporter Agent  │
-│                  │    │                  │    │                  │    │                  │
-│ scan_github_     │    │ analyze_repo_    │    │ analyze_repo_    │    │ (LLM-only)       │
-│ repository       │    │ files            │    │ security         │    │ Synthesizes all  │
-│ (1 MCP call)     │    │ (1 MCP call)     │    │ (1 MCP call)     │    │ into a report    │
-└──────────────────┘    └──────────────────┘    └──────────────────┘    └──────────────────┘
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│   Scanner   │ → │   Analyst   │ → │  Security   │ → │  Reporter   │ → │   Critic    │
+│   Agent     │   │   Agent     │   │   Agent     │   │   Agent     │   │   Agent     │
+│             │   │             │   │             │   │             │   │             │
+│ scan_github │   │ analyze_    │   │ analyze_    │   │ (LLM-only)  │   │ (LLM-only)  │
+│ _repository │   │ file_with_  │   │ repo_       │   │ Synthesizes │   │ Validates   │
+│ (1 MCP)     │   │ hotspot     │   │ security_   │   │ into report │   │ coherence   │
+│             │   │ (per file)  │   │ deep (1MCP) │   │             │   │             │
+└─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘
 ```
 
-**Total LLM calls**: 4 (one per agent) — designed to stay within free-tier quotas.
+**Total LLM calls**: 5 (one per agent) — designed to stay within free-tier quotas.
 
 ---
 
@@ -38,9 +41,10 @@ User Prompt: "Audit google/adk-python"
 | Agent | Role | Tools |
 |-------|------|-------|
 | `scanner_agent` | Collects repo structure, dependencies, and commit activity | `scan_github_repository` (MCP) |
-| `analyst_agent` | Analyzes Python files for code smells | `analyze_repo_files` (MCP) |
-| `security_agent` | Checks OSV.dev CVEs + scans for secrets | `analyze_repo_security` (MCP) |
+| `analyst_agent` | Analyzes Python files for code quality + hotspot analysis | `analyze_file_with_hotspot` (MCP) |
+| `security_agent` | CVEs, dangerous APIs, attack surface, OWASP mapping, score | `analyze_repo_security_deep` (MCP) |
 | `reporter_agent` | Synthesizes all outputs into a scored Markdown report | None (pure LLM) |
+| `critic_agent` | Challenges report coherence before final delivery (LLM-as-judge) | None (pure LLM) |
 
 ### MCP Tools (via `github_mcp_server.py`)
 
@@ -48,7 +52,10 @@ User Prompt: "Audit google/adk-python"
 |------|-------------|
 | `scan_github_repository` | Full repo structure (Git Trees API), dependency file, commit activity |
 | `analyze_repo_files` | Downloads & runs code metrics on a list of Python files |
+| `analyze_file_with_hotspot` | All-in-one: quality metrics + commit churn + hotspot score for one file |
+| `get_file_commit_frequency` | Number of commits touching a specific file in the last N days |
 | `analyze_repo_security` | OSV.dev CVE check + regex secret detection |
+| `analyze_repo_security_deep` | Full security audit: CVEs, dangerous APIs, attack surface, OWASP, score |
 | `get_file_content` | Fetches a single file's content |
 | `get_dependency_file` | Finds and returns the project's dependency file |
 | `get_commit_activity` | Returns last commit date and message |
@@ -57,13 +64,16 @@ User Prompt: "Audit google/adk-python"
 
 | Metric | Tool | Severity |
 |--------|------|----------|
-| Cyclomatic complexity > 10 | `radon` | MAJEUR |
-| Cyclomatic complexity > 15 | `radon` | CRITIQUE |
-| Function length > 50 lines | AST parser | MAJEUR |
-| Code duplication > 60% | Line-set intersection | MAJEUR |
-| Code duplication > 80% | Line-set intersection | CRITIQUE |
-| Documentation ratio < 30% | AST docstring check | MINEUR |
-| TODO/FIXME count > 5 | String scan | MINEUR |
+| Cyclomatic complexity > 10 | `radon` | MAJOR |
+| Cyclomatic complexity > 15 | `radon` | CRITICAL |
+| Function length > 50 lines | AST parser | MAJOR |
+| Code duplication > 60% | Line-set intersection | MAJOR |
+| Code duplication > 80% | Line-set intersection | CRITICAL |
+| Documentation ratio < 30% | AST docstring check | MINOR |
+| TODO/FIXME count > 5 | String scan | MINOR |
+| Hotspot Score > 100 (complexity × commits) | Hotspot analysis | CRITICAL HOTSPOT |
+| Hotspot Score 41-100 | Hotspot analysis | MODERATE HOTSPOT |
+| Hotspot Score ≤ 40 | Hotspot analysis | STABLE |
 
 ### Security Detection
 
@@ -143,6 +153,19 @@ adk web
 # Type your audit request, e.g.:
 # "Audit the repository google/adk-python"
 ```
+
+### Streamlit Web App (Recommended for Demos)
+
+For a beautiful, styled, interactive visual dashboard that displays the agent reasoning sequence and detailed findings, run the Streamlit application:
+
+```bash
+# Install dependencies
+uv add streamlit
+
+# Launch the app
+streamlit run streamlit_app.py
+```
+
 
 ### API Server
 
@@ -231,13 +254,14 @@ gcloud run services replace deployment/cloudrun.yaml --region=us-central1
 ```
 codesleuth/
 ├── codesleuth/                  # Main package
-│   ├── agent.py                 # Root SequentialAgent orchestrator
+│   ├── agent.py                 # Root SequentialAgent orchestrator (5 agents)
 │   ├── config.py                # Shared thresholds and constants
 │   ├── agents/
 │   │   ├── scanner_agent.py     # Scanner Agent (GitHub structure)
-│   │   ├── analyst_agent.py     # Analyst Agent (code smells)
-│   │   ├── security_agent.py    # Security Agent (CVEs + secrets)
-│   │   └── reporter_agent.py    # Reporter Agent (Markdown report)
+│   │   ├── analyst_agent.py     # Analyst Agent (code quality & hotspots)
+│   │   ├── security_agent.py    # Security Agent (CVEs + secrets + deep audit)
+│   │   ├── reporter_agent.py    # Reporter Agent (Markdown report)
+│   │   └── critic_agent.py      # Critic Agent (coherence verification)
 │   ├── mcp/
 │   │   └── github_mcp_server.py # FastMCP server exposing all tools
 │   └── tools/
@@ -246,12 +270,15 @@ codesleuth/
 ├── tests/
 │   ├── test_code_analysis.py    # Unit tests for code metrics
 │   ├── test_osv_tools.py        # Unit tests for security tools
-│   └── test_github_tools.py     # Unit tests for GitHub tool logic
+│   ├── test_github_tools.py     # Unit tests for GitHub tool logic
+│   └── test_hotspot.py          # Unit tests for hotspot calculation
 ├── deployment/
 │   └── cloudrun.yaml            # Google Cloud Run deployment manifest
 ├── .env.example                 # Environment variable template
 ├── Dockerfile                   # Multi-stage production Dockerfile
 ├── pyproject.toml               # Project metadata and dependencies
+├── requirements_streamlit.txt   # Streamlit-specific dependencies
+├── streamlit_app.py             # Streamlit front-end entrypoint
 └── README.md                    # This file
 ```
 

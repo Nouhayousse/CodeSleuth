@@ -10,6 +10,7 @@ from codesleuth.tools.osv_tools import (
     detect_potential_secrets,
     check_vulnerabilities,
     _parse_requirements,
+    _extract_severity,
 )
 
 
@@ -181,3 +182,66 @@ class TestCheckVulnerabilitiesNetwork:
         # A fictional package that should return no vulns
         result = check_vulnerabilities("this-package-does-not-exist-xyz", "PyPI")
         assert result["vuln_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests : _extract_severity
+# ---------------------------------------------------------------------------
+
+class TestExtractSeverity:
+    def test_extract_score_from_database_specific(self):
+        vuln = {
+            "database_specific": {
+                "cvss": {
+                    "score": 9.8,
+                    "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+                }
+            }
+        }
+        assert _extract_severity(vuln) == "Critical"
+
+    def test_extract_score_from_severity_list(self):
+        vuln = {
+            "severity": [
+                {
+                    "type": "CVSS_V3",
+                    "score": "8.5"
+                }
+            ]
+        }
+        assert _extract_severity(vuln) == "High"
+
+    def test_extract_score_from_description_text(self):
+        vuln = {
+            "summary": "This vulnerability has a CVSS base score of 5.5 in our analysis."
+        }
+        assert _extract_severity(vuln) == "Medium"
+
+        vuln_details = {
+            "details": "The base CVSS score is 2.3 for this vulnerability."
+        }
+        assert _extract_severity(vuln_details) == "Low"
+
+    def test_extract_qualitative_label_database_specific(self):
+        vuln = {
+            "database_specific": {
+                "severity": "HIGH"
+            }
+        }
+        assert _extract_severity(vuln) == "High"
+
+        vuln_moderate = {
+            "database_specific": {
+                "severity": "MODERATE"
+            }
+        }
+        assert _extract_severity(vuln_moderate) == "Medium"
+
+    def test_extract_fallback_unknown(self):
+        vuln = {
+            "id": "GHSA-unknown",
+            "summary": "No CVSS score mentioned anywhere."
+        }
+        assert _extract_severity(vuln) == "Unknown"
+
+

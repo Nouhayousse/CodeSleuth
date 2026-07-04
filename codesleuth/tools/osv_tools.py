@@ -68,18 +68,18 @@ def check_vulnerabilities(
         resp.raise_for_status()
         data = resp.json()
     except httpx.TimeoutException:
-        return {"error": f"Timeout lors de la requete OSV.dev pour {package_name}"}
+        return {"error": f"Timeout during OSV.dev request for {package_name}"}
     except httpx.HTTPStatusError as e:
-        return {"error": f"Erreur HTTP OSV.dev : {e.response.status_code}"}
+        return {"error": f"OSV.dev HTTP error: {e.response.status_code}"}
     except Exception as e:
-        return {"error": f"Erreur inattendue OSV.dev : {e}"}
+        return {"error": f"Unexpected OSV.dev error: {e}"}
 
     vulns = data.get("vulns", [])
     simplified = []
     for v in vulns:
         simplified.append({
             "id": v.get("id"),
-            "summary": v.get("summary", "Pas de resume disponible"),
+            "summary": v.get("summary", "No summary available"),
             "severity": _extract_severity(v),
             "published": v.get("published", "?"),
             "aliases": v.get("aliases", []),
@@ -88,39 +88,125 @@ def check_vulnerabilities(
     return {
         "package": package_name,
         "ecosystem": ecosystem,
-        "version": version or "non specifie",
+        "version": version or "not specified",
         "vulnerabilities": simplified,
         "vuln_count": len(simplified),
     }
 
 
+def _extract_score_from_dict(d) -> float | None:
+    if isinstance(d, dict):
+        for key in ["score", "cvss_score", "cvss3_score", "cvss2_score"]:
+            if key in d:
+                val = d[key]
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    pass
+        for k, v in d.items():
+            if "score" in k.lower() or "cvss" in k.lower():
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        return float(v)
+                    except ValueError:
+                        pass
+            if isinstance(v, (dict, list)):
+                res = _extract_score_from_dict(v)
+                if res is not None:
+                    return res
+    elif isinstance(d, list):
+        for item in d:
+            res = _extract_score_from_dict(item)
+            if res is not None:
+                return res
+    return None
+
+
+def _extract_label_from_dict(d) -> str | None:
+    if isinstance(d, dict):
+        if "severity" in d:
+            val = d["severity"]
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        for k, v in d.items():
+            if "severity" in k.lower() or "level" in k.lower() or "priority" in k.lower():
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            if isinstance(v, (dict, list)):
+                res = _extract_label_from_dict(v)
+                if res is not None:
+                    return res
+    elif isinstance(d, list):
+        for item in d:
+            res = _extract_label_from_dict(item)
+            if res is not None:
+                return res
+    return None
+
+
+def _extract_score_from_text(vuln_entry: dict) -> float | None:
+    text_parts = []
+    for field in ["summary", "details", "description"]:
+        val = vuln_entry.get(field)
+        if isinstance(val, str):
+            text_parts.append(val)
+    text = " ".join(text_parts)
+    if not text:
+        return None
+    matches = re.findall(
+        r'(?:cvss|score|severite|severity|base\s+score)[^.0-9]*\b(10\.0|[0-9]\.[0-9])\b',
+        text,
+        re.IGNORECASE
+    )
+    if matches:
+        try:
+            return float(matches[0])
+        except ValueError:
+            pass
+    return None
+
+
 def _extract_severity(vuln_entry: dict) -> str:
-    """Extrait la sévérité depuis severity[], database_specific, ou 'UNKNOWN'."""
-    severity_list = vuln_entry.get("severity", [])
-    for s in severity_list:
-        score = s.get("score", "")
-        if "CRITICAL" in score.upper():
-            return "CRITICAL"
-        if "HIGH" in score.upper():
-            return "HIGH"
-        if "MEDIUM" in score.upper():
-            return "MEDIUM"
-        if "LOW" in score.upper():
-            return "LOW"
-    # Fallback: database_specific CVSS
-    db_specific = vuln_entry.get("database_specific", {})
-    cvss = db_specific.get("cvss", {})
-    if isinstance(cvss, dict):
-        base_score = cvss.get("score", 0)
-        if base_score >= 9.0:
-            return "CRITICAL"
-        if base_score >= 7.0:
-            return "HIGH"
-        if base_score >= 4.0:
-            return "MEDIUM"
-        if base_score > 0:
-            return "LOW"
-    return "UNKNOWN"
+    """
+    Extracts the CVSS score from the OSV vulnerability entry
+    and converts it to a qualitative label (Critical, High, Medium, Low).
+    In fallback, searches for a direct label (database_specific.severity).
+    """
+    # 1. Search for a structured numerical score
+    score = _extract_score_from_dict(vuln_entry)
+    
+    # 2. Search for a numerical score in textual descriptions
+    if score is None:
+        score = _extract_score_from_text(vuln_entry)
+        
+    # 3. Convert score to label
+    if score is not None:
+        if score >= 9.0:
+            return "Critical"
+        elif score >= 7.0:
+            return "High"
+        elif score >= 4.0:
+            return "Medium"
+        else:
+            return "Low"
+            
+    # 4. Fallback: search for a qualitative text label
+    label = _extract_label_from_dict(vuln_entry)
+    if label:
+        label_upper = label.upper()
+        if "CRITICAL" in label_upper or "CRITIQUE" in label_upper:
+            return "Critical"
+        elif "HIGH" in label_upper or "ÉLEVÉE" in label_upper or "ELEVEE" in label_upper:
+            return "High"
+        elif "MEDIUM" in label_upper or "MODERATE" in label_upper or "MOYENNE" in label_upper or "MOYEN" in label_upper:
+            return "Medium"
+        elif "LOW" in label_upper or "FAIBLE" in label_upper:
+            return "Low"
+            
+    return "Unknown"
+
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +320,7 @@ def analyze_repo_security(
     try:
         r = gh.get_repo(f"{owner}/{repo}")
     except GithubException as e:
-        return {"error": f"Repo introuvable ou inaccessible : {e}"}
+        return {"error": f"Repository not found or inaccessible: {e}"}
 
     for filename in candidates:
         try:
@@ -272,7 +358,7 @@ def analyze_repo_security(
             py_files.sort(key=lambda p: (p.count("/"), p))
             files_to_scan = py_files[:max_files]
         except GithubException as e:
-            secret_results.append({"error": f"Impossible de lister les fichiers : {e}"})
+            secret_results.append({"error": f"Unable to list repository files: {e}"})
 
     for filepath in files_to_scan:
         try:
@@ -294,14 +380,14 @@ def analyze_repo_security(
     ]
 
     summary = (
-        f"Analyse de securite de {owner}/{repo} : "
-        f"{total_vulns} vulnerabilite(s) OSV trouvee(s) dans {len(vulnerable_packages)} paquet(s), "
-        f"{total_secrets} secret(s) potentiel(s) detecte(s) dans {len(files_to_scan)} fichier(s)."
+        f"Security analysis for {owner}/{repo}: "
+        f"{total_vulns} OSV vulnerability(ies) found in {len(vulnerable_packages)} package(s), "
+        f"{total_secrets} potential secret(s) detected in {len(files_to_scan)} file(s)."
     )
 
     return {
         "repo": f"{owner}/{repo}",
-        "dependency_file_scanned": dep_filename or "aucun",
+        "dependency_file_scanned": dep_filename or "none",
         "packages_checked": len(dep_results),
         "dependency_vulnerabilities": dep_results,
         "files_scanned_for_secrets": files_to_scan,
@@ -311,3 +397,4 @@ def analyze_repo_security(
         "vulnerable_packages": vulnerable_packages,
         "summary": summary,
     }
+

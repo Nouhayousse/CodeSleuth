@@ -108,3 +108,23 @@ def detect_code_duplication_simple(source_code_a: str, source_code_b: str) -> di
     common = lines_a & lines_b
     similarity = round(len(common) / min(len(lines_a), len(lines_b)) * 100, 1)
     return {"similarity_percent": similarity, "common_lines": len(common)}
+
+
+def compute_hotspot_score(complexity_score: int, commit_count: int) -> dict:
+    """
+    Calculates a hotspot score = complexity * churn (commit frequency).
+    A high score flags code sections that are both complex AND frequently changed.
+    """
+    hotspot_score = complexity_score * commit_count
+    if hotspot_score > 100:
+        risk_level = "CRITICAL HOTSPOT"
+    elif hotspot_score > 40:
+        risk_level = "MODERATE HOTSPOT"
+    else:
+        risk_level = "STABLE"
+    return {
+        "hotspot_score": hotspot_score,
+        "risk_level": risk_level,
+        "complexity_component": complexity_score,
+        "churn_component": commit_count,
+    }
